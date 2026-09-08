@@ -50,7 +50,9 @@ class DataReorderableBuilder {
             }
         }
 
-        return fields.concat(dataReorderable.get().fields);
+        fields = fields.concat(dataReorderable.fields);
+
+        return fields;
     }
 
     #end
