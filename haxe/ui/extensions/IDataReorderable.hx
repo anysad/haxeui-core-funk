@@ -1,4 +1,4 @@
-package haxe.ui.core;
+package haxe.ui.extensions;
 
 @:autoBuild(haxe.ui.macros.extensions.DataReorderableBuilder.build())
 interface IDataReorderable {
