@@ -17,18 +17,22 @@ import haxe.ui.core.InteractiveComponent;
 import haxe.ui.core.ItemRenderer;
 import haxe.ui.data.ArrayDataSource;
 import haxe.ui.data.DataSource;
+import haxe.ui.dragdrop.DragManager;
 import haxe.ui.events.ActionEvent;
+import haxe.ui.events.DragEvent;
 import haxe.ui.events.ItemEvent;
 import haxe.ui.events.MouseEvent;
+import haxe.ui.events.ReorderEvent;
 import haxe.ui.events.ScrollEvent;
 import haxe.ui.events.UIEvent;
+import haxe.ui.extensions.IDataReorderable;
 import haxe.ui.layouts.VerticalVirtualLayout;
 import haxe.ui.styles.Style;
 import haxe.ui.util.MathUtil;
 import haxe.ui.util.Variant;
 
 @:composite(ListViewEvents, ListViewBuilder, VerticalVirtualLayout)
-class ListView extends ScrollView implements IDataComponent implements IVirtualContainer {
+class ListView extends ScrollView implements IDataComponent implements IVirtualContainer implements IDataReorderable {
     //***********************************************************************************************************
     // Public API
     //***********************************************************************************************************
@@ -90,6 +94,57 @@ class ListView extends ScrollView implements IDataComponent implements IVirtualC
 
         return value;
     }
+
+    public function reorderItems(fromIndex:Int, toIndex:Int):Void {
+        reorderItemsByIndices([fromIndex], toIndex);
+    }
+
+    public function reorderItemsByIndices(fromIndices:Array<Int>, toIndex:Int):Void {
+        if (dataSource == null || dataSource.size <= 1) {
+            return;
+        }
+
+        if (fromIndices == null || fromIndices.length == 0) {
+            return;
+        }
+
+        var indices:Array<Int> = fromIndices.copy();
+        indices.sort(function(a:Int, b:Int):Int {
+            return a - b;
+        });
+
+        var items:Array<Dynamic> = [];
+        for (index in indices) {
+            if (index >= 0 && index < dataSource.size) {
+                items.push(dataSource.get(index));
+            }
+        }
+
+        if (items.length == 0) {
+            return;
+        }
+
+        for (index in indices.slice().reverse()) {
+            dataSource.removeAt(index);
+        }
+
+        var insertIndex:Int = toIndex;
+        if (insertIndex > indices[0]) {
+            insertIndex -= items.length;
+        }
+        if (insertIndex < 0) {
+            insertIndex = 0;
+        }
+        if (insertIndex > dataSource.size) {
+            insertIndex = dataSource.size;
+        }
+
+        for (i in 0...items.length) {
+            dataSource.insert(insertIndex + i, items[i]);
+        }
+
+        selectedIndices = [for (i in 0...items.length) insertIndex + i];
+    }
 }
 
 //***********************************************************************************************************
@@ -131,6 +186,12 @@ class ListViewEvents extends ScrollViewEvents {
         instance.registerEvent(MouseEvent.MOUSE_DOWN, onRendererMouseDown);
         instance.registerEvent(MouseEvent.CLICK, onRendererClick);
         instance.registerEvent(MouseEvent.RIGHT_CLICK, onRendererClick);
+        if (_listview.dataReorderable == true) {
+            instance.registerEvent(haxe.ui.events.DragEvent.DRAG_START, onRendererDragStart);
+            instance.registerEvent(haxe.ui.events.DragEvent.DRAG, onRendererDrag);
+            instance.registerEvent(haxe.ui.events.DragEvent.DRAG_END, onRendererDragEnd);
+            DragManager.instance.registerDraggable(instance, { mouseTarget: instance, dragTolerance: 2 });
+        }
         if (_listview.selectedIndices.indexOf(instance.itemIndex) != -1) {
             var builder:ListViewBuilder = cast(_listview._compositeBuilder, ListViewBuilder);
             builder.addItemRendererClass(instance, ":selected");
@@ -142,10 +203,107 @@ class ListViewEvents extends ScrollViewEvents {
         instance.unregisterEvent(MouseEvent.MOUSE_DOWN, onRendererMouseDown);
         instance.unregisterEvent(MouseEvent.CLICK, onRendererClick);
         instance.unregisterEvent(MouseEvent.RIGHT_CLICK, onRendererClick);
+        if (_listview.dataReorderable == true) {
+            instance.unregisterEvent(haxe.ui.events.DragEvent.DRAG_START, onRendererDragStart);
+            instance.unregisterEvent(haxe.ui.events.DragEvent.DRAG, onRendererDrag);
+            instance.unregisterEvent(haxe.ui.events.DragEvent.DRAG_END, onRendererDragEnd);
+            DragManager.instance.unregisterDraggable(instance);
+        }
         if (_listview.selectedIndices.indexOf(instance.itemIndex) != -1) {
             var builder:ListViewBuilder = cast(_listview._compositeBuilder, ListViewBuilder);
             builder.addItemRendererClass(instance, ":selected", false);
         }
+    }
+
+    private var _reorderSourceIndex:Int = -1;
+    private var _reorderSourceIndices:Array<Int> = null;
+
+    private function onRendererDragStart(e:haxe.ui.events.DragEvent) {
+        var renderer:ItemRenderer = cast(e.target, ItemRenderer);
+        _reorderSourceIndex = renderer.itemIndex;
+        _reorderSourceIndices = _listview.selectedIndices != null && _listview.selectedIndices.indexOf(renderer.itemIndex) != -1 ? _listview.selectedIndices.copy() : [renderer.itemIndex];
+
+        var reorderEvent = new ReorderEvent(ReorderEvent.REORDER_START);
+        reorderEvent.target = _listview;
+        reorderEvent.data = {
+            items: [for (i in _reorderSourceIndices) if (i >= 0 && i < _listview.dataSource.size) _listview.dataSource.get(i)],
+            fromIndex: _reorderSourceIndex,
+            fromIndices: _reorderSourceIndices.copy()
+        };
+        _listview.dispatch(reorderEvent);
+        if (reorderEvent.canceled == true) {
+            e.cancel();
+        }
+    }
+
+    private function onRendererDrag(e:haxe.ui.events.DragEvent) {
+        if (_reorderSourceIndices == null || _reorderSourceIndices.length == 0) {
+            return;
+        }
+
+        var targetIndex:Int = getReorderTargetIndex(e.screenX, e.screenY);
+        var reorderEvent = new ReorderEvent(ReorderEvent.REORDER);
+        reorderEvent.target = _listview;
+        reorderEvent.data = {
+            items: [for (i in _reorderSourceIndices) if (i >= 0 && i < _listview.dataSource.size) _listview.dataSource.get(i)],
+            fromIndex: _reorderSourceIndex,
+            fromIndices: _reorderSourceIndices.copy(),
+            toIndex: targetIndex
+        };
+        _listview.dispatch(reorderEvent);
+    }
+
+    private function onRendererDragEnd(e:haxe.ui.events.DragEvent) {
+        if (_reorderSourceIndices == null || _reorderSourceIndices.length == 0) {
+            return;
+        }
+
+        var targetIndex:Int = getReorderTargetIndex(e.screenX, e.screenY);
+        var reorderEvent = new ReorderEvent(ReorderEvent.REORDER_END);
+        reorderEvent.target = _listview;
+        reorderEvent.data = {
+            items: [for (i in _reorderSourceIndices) if (i >= 0 && i < _listview.dataSource.size) _listview.dataSource.get(i)],
+            fromIndex: _reorderSourceIndex,
+            fromIndices: _reorderSourceIndices.copy(),
+            toIndex: targetIndex
+        };
+        _listview.dispatch(reorderEvent);
+        if (reorderEvent.canceled == true) {
+            _reorderSourceIndex = -1;
+            _reorderSourceIndices = null;
+            return;
+        }
+
+        _listview.reorderItemsByIndices(_reorderSourceIndices, targetIndex);
+        _reorderSourceIndex = -1;
+        _reorderSourceIndices = null;
+    }
+
+    private function getReorderTargetIndex(screenX:Float, screenY:Float):Int {
+        var targetIndex:Int = _reorderSourceIndex >= 0 ? _reorderSourceIndex : 0;
+        var items:Array<ItemRenderer> = _listview.findComponentsUnderPoint(screenX, screenY, ItemRenderer);
+        if (items != null && items.length > 0) {
+            for (item in items) {
+                if (item.itemIndex >= 0) {
+                    var insertionIndex:Int = item.itemIndex;
+                    if (screenY > item.top + (item.height * 0.5)) {
+                        insertionIndex += 1;
+                    }
+                    if (insertionIndex >= 0) {
+                        targetIndex = insertionIndex;
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (targetIndex < 0) {
+            targetIndex = 0;
+        }
+        if (targetIndex > _listview.dataSource.size) {
+            targetIndex = _listview.dataSource.size;
+        }
+        return targetIndex;
     }
 
     private function onRendererMouseDown(e:MouseEvent) {
